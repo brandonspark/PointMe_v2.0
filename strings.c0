@@ -1,0 +1,9 @@
+int main(){
+    x = "hello there\n
+            what are you doing on this fine day??!??        haha\n";
+
+    y = "there 2 + 3 / 8 += 2 >>= 15 + 8
+            
+                - 2 + 5 -- ; } { [] ( )))( ";
+    z = "\n";
+}

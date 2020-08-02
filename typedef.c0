@@ -1,0 +1,32 @@
+
+typedef string charstar;
+
+typedef int foo;
+
+typedef foo bar;
+
+struct client {
+    int x;
+    int y;
+};
+
+typedef struct client client_t;
+
+typedef int* whatever;
+
+typedef whatever* gold;
+
+struct zew;
+
+typedef zew ** peace;
+
+int main(){
+    charstar x = 2;
+    charstar *y = 2;
+    bar z = 5;
+    client_t p = 2;
+    struct client m = 2;
+    peace x = 2;
+    struct zew p = 5;
+    gold g = 3;
+}

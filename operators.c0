@@ -1,0 +1,14 @@
+int main(){
+    int x = 2;
+    int * * x = !x;
+    int **x = !(x);
+    int** x = !x[10];
+    int x = ~!x[0]->foo;
+    x >>= 2;
+    x <<= 4;
+    x &= 2;
+    x += 4;
+    x++;
+    int *y = *y + 2;
+    **x = 2;
+}

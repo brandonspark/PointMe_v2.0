@@ -1,0 +1,10 @@
+Currently rests upon the assumption that, inside of a struct { }; definition,
+there are no curly braces. The c0 reference says there are no unions, so this is
+probably fine?
+
+Probably massively buggy with respect to anything that involves newlines or
+escaped characters.
+
+
+
+
