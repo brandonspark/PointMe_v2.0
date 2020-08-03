@@ -96,11 +96,15 @@ struct
         if quoteMark then
         (match cs with
             [] -> acc
+          | '\\'::'"'::xs -> spaceOut xs ('"'::'\\'::acc) quoteMark
+          | '\''::'"'::'\''::xs -> spaceOut xs ('\''::'"'::'\''::acc) quoteMark
           | '"'::xs -> spaceOut xs ('"'::acc) (not quoteMark)
           | x::xs -> spaceOut xs (x::acc) quoteMark)
         else
         (match cs with
             [] -> acc
+          | '\\'::'"'::xs -> spaceOut xs ('"'::'\\'::acc) quoteMark
+          | '\''::'"'::'\''::xs -> spaceOut xs ('\''::'"'::'\''::acc) quoteMark
           | '"'::xs -> spaceOut xs ('"'::acc) (not quoteMark)
           | '\t'::xs -> spaceOut xs (' '::acc) quoteMark
           | '\n'::xs -> spaceOut xs (' '::acc) quoteMark
@@ -153,10 +157,15 @@ struct
      * list. *)
     let rec splitSpaces (cs : char list) = match cs with
         [] -> (false, "", [])
+      | '\\'::'"'::xs ->
+              let (flag, s, ss) = splitSpaces xs in (flag, "\"" ^ s, ss)
+      | '\''::'"'::'\''::xs ->
+              let (flag, s, ss) = splitSpaces xs in (flag, "", if s = "" then 
+                  "'\"'"::ss else "'\"'"::s::ss)
       | x::xs ->
         let (flag, s, ss) = splitSpaces xs in
         if flag then
-            (match x with
+            (match x with  
                 '"' -> (false, charToStr '"' ^ s, ss)
               | _ -> (true, charToStr x ^ s, ss))
         else
