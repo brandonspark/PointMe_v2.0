@@ -90,6 +90,30 @@ struct
     let ampList = ['&'; '=']
     let pipeList = ['|'; '=']
 
+    let rec remove_comments1 (cs : char list) (acc : char list) (cmark : bool) : char list =
+        if cmark then
+        (match cs with
+            [] -> acc
+          | '\n'::xs -> remove_comments1 xs acc false
+          | x::xs -> remove_comments1 xs acc cmark)
+                 else
+        (match cs with
+            [] -> acc
+          | '/'::'/'::xs -> remove_comments1 xs acc true
+          | x::xs -> remove_comments1 xs (x::acc) cmark)
+
+    let rec remove_comments2 (cs : char list) (acc : char list) (cmark : bool) : char list =
+        if cmark then
+            (match cs with
+                [] -> acc
+              | '*'::'/'::xs -> remove_comments2 xs acc false
+              | x::xs -> remove_comments2 xs acc cmark)
+                 else
+            (match cs with
+                [] -> acc
+              | '/'::'*'::xs -> remove_comments2 xs acc true
+              | x::xs -> remove_comments2 xs (x::acc) cmark)
+
     (* spaceOut takes in a char list of text in a file and transforms it into a
      * space-separated character list, based on operators. *)
     let rec spaceOut (cs : char list) (acc : char list) (quoteMark : bool) : char list =
@@ -184,7 +208,9 @@ struct
      * of the constituent tokens in the program *)
     let split (fileName : string) : string list =
         let programString = programToString fileName in
-        let spaced = spaceOut (explode programString) [] false in
+        let noComments1 = remove_comments1 (explode programString) [] false in
+        let noComments2 = remove_comments2 noComments1 [] false in
+        let spaced = spaceOut (noComments2) [] false in
         let noDupes = removeDupes spaced [] in
         let buf = Buffer.create (List.length noDupes) in
         let () = List.iter (Buffer.add_char buf) noDupes in
@@ -383,9 +409,9 @@ struct
       | _ -> matchRest (explode s) tdict tlist
 
     (* lex finally lexes the entirety of the file. *)
-    let lex (fileName : string) : token list =
+    let lex (fileName : string) : token list * typeDict * string list =
         let slist = split fileName in
         let tdict = typedict_init slist (TypeMap.empty) in
         let tlist = get_typelist slist ["int"; "bool"; "void"; "string"; "char"] in
-        List.map (fun s -> matcher s tdict tlist) slist
+        (List.map (fun s -> matcher s tdict tlist) slist, tdict, tlist)
 end;;

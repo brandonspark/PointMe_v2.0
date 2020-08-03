@@ -1,0 +1,12 @@
+#use <conio>
+
+
+// hello there this is a comment
+
+int main()
+//@requires(nothing);
+{
+    int x = 2;
+    // this is kind of a weird thing
+    return;
+}
