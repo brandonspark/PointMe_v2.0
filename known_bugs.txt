@@ -11,6 +11,7 @@ The line "#use <string>" currently interprets "string" as a Type, not an
 Identifier. Additionally, the < and > are LChevron and RChevron, when in reality
 the whole thing should be LibLit "string", probably.
 
-
+Right now, only assuming that lib lits are using chevrons instead of string
+lits.
 
 

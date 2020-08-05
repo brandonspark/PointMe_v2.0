@@ -1,3 +1,5 @@
+#use <string>
+
 int main(){
     char x = '"';
     char y = "so \"what\" then";
