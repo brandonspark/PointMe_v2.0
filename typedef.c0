@@ -27,6 +27,7 @@ int main(){
     client_t p = 2;
     struct client m = 2;
     peace x = 2;
+    int*[]* j = alloc(int * []);
     struct zew p = 5;
     gold g = 3;
 }

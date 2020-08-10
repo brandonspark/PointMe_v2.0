@@ -1,9 +1,9 @@
 #load "str.cma";;
 #use "Utils.ml";;
 
-type ty = string * int (* name of type, and number of iterated pointers *)
-
-module StrMap = Map.Make(String);;
+type ty = Base of string
+        | Ptr of ty
+        | Array of ty (* name of type, and number of iterated pointers *)
 
 (* yes, I'm aware it's an atrocious type. *)
 type token =
@@ -16,7 +16,7 @@ type token =
    | Type of ty
    | Struct
    | Typedef
-   | If | While | Else | For | Continue | Break | Return | Assert
+   | If | While | Else | For | Continue | Break | Return | Assert | Error
    | NULL
    | Alloc | Alloc_array
    | Use
@@ -52,6 +52,7 @@ type token =
    | Semicolon
    | Period
    | EqEq
+   | NotEq
    | Leq
    | Geq
 
@@ -98,7 +99,7 @@ module type LEXER =
 module Lexer : LEXER =
 struct
 
-    type typeDict = (string * int) StrMap.t
+    type typeDict = ty StrMap.t
 
     let rec programToString (fileName : string) : string =
         let input = open_in fileName in
@@ -239,6 +240,16 @@ struct
                 "" -> ss
               | _ -> s::ss
 
+    let rec get_type (ss : string list) (acc : ty) (sc : ty * string list -> 'a) : 'a = match ss with
+        "*"::xs -> get_type xs (Ptr acc) sc 
+      | "["::"]"::xs -> get_type xs (Array acc) sc 
+      | _ -> sc (acc, ss)
+    
+    let rec get_type_t (ts : token list) (acc : ty) (sc : ty * token list -> 'a) : 'a = match ts with
+        Asterisk::xs -> get_type_t xs (Ptr acc) sc 
+      | LBracket::RBracket::xs -> get_type_t xs (Array acc) sc 
+      | _ -> sc (acc, ts)
+
     (* typedict_init, given a string list of the separated tokens, adds all the
      * relationships created by typedefs in the program. It maps the new names
      * to the old names. Notably, if the old name was a struct, the canonical
@@ -246,20 +257,18 @@ struct
     let rec typedict_init (ss : string list) (d : typeDict) : typeDict = match ss with
         [] -> d
       | "typedef"::"struct"::oldname::rest ->
-            count_symbol rest "*"
-                (fun (num, rest1) -> match rest1 with
+            get_type rest (Base ("s_" ^ oldname)) (fun (ty, rest1) ->
+                match rest1 with
                     [] -> failwith "No name for typedef."
                   | newname::rest2 -> find_symbol rest2 ";" []
-                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname 
-                                                            ("s_"^ oldname, num) d))
+                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname ty d))
                     (fun () -> failwith "Unable to find semicolon."))
       | "typedef"::oldname::rest -> 
-            count_symbol rest "*" 
-                (fun (num, rest1) -> match rest1 with
+            get_type rest (Base oldname) (fun (ty, rest1) ->
+                match rest1 with
                     [] -> failwith "No name for typedef."
-                  | newname::rest2 -> 
-                find_symbol rest2 ";" []
-                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname (oldname, num) d))
+                  | newname::rest2 -> find_symbol rest2 ";" []
+                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname ty d))
                     (fun () -> failwith "Unable to find semicolon."))
       | x::xs -> typedict_init xs d
 
@@ -280,11 +289,14 @@ struct
       | x::xs -> gen_typelist xs acc
 
     (* a function for navigating the type dict, to find the canonical type. *)
-    let rec findCanonicalType (s : string) (typeList : string list) (tdict : typeDict) = 
+    (*let rec findCanonicalType (s : string) (typeList : string list) (tdict : typeDict) = 
         try (List.find (fun elem -> elem = s) typeList, 0) with Not_found -> 
-            let (t, n) = StrMap.find s tdict in
+            match StrMap.find s tdict with
+                Ptr t ->
+              | Array t ->
+              | Base t -> 
             let (ct, n') = findCanonicalType t typeList tdict in
-            (ct, n + n')
+            (ct, n + n')*)
 
     (* hasLast checks if a char list has a last character of the provided
      * character *)
@@ -304,7 +316,7 @@ struct
     let matchRest (cs : char list) (tdict : typeDict) (tlist : string list) : token = match cs with
         [] -> failwith "No match possible.\n"
       | '"'::rest -> if hasLast rest '"' then 
-                        StrLit (Utils.implode (Utils.takeR rest 1))
+                        StrLit (Utils.implode (Utils.dropR rest 1))
                     else failwith "Invalid string literal"
       | '\''::rest -> if hasLast rest '\'' then
                         if List.length rest = 2 && is_printable (List.nth rest 0) then
@@ -317,16 +329,16 @@ struct
                           | ['\\'; '\''] -> ChrLit '\''
                           | _ -> failwith "Invalid char")
                       else failwith "No ending apostrophe found.\n"
-      | '<'::rest -> if hasLast rest '>' then LibLit (Utils.implode (Utils.takeR rest 1))
+      | '<'::rest -> if hasLast rest '>' then LibLit (Utils.implode (Utils.dropR rest 1))
                                          else failwith "No ending chevron found"
       | _ -> try Const (int_of_string (Utils.implode cs)) with int_of_string ->
                 let s = Utils.implode cs in
                 (match Utils.implode cs with
-                    "int" ->  Type ("int", 0)
-                  | "bool" -> Type ("bool", 0)
-                  | "string" -> Type ("string", 0)
-                  | "char" -> Type ("char", 0)
-                  | "void" -> Type ("void", 0)
+                    "int" ->  Type (Base "int")
+                  | "bool" -> Type (Base "bool")
+                  | "string" -> Type (Base "string")
+                  | "char" -> Type (Base "char")
+                  | "void" -> Type (Base "void")
                   | "struct" -> Struct 
                   | "typedef" -> Typedef 
                   | "if" -> If
@@ -342,10 +354,11 @@ struct
                   | "NULL" -> NULL
                   | "alloc" -> Alloc
                   | "alloc_array" -> Alloc_array 
+                  | "error" -> Error
                   | _ -> if (List.mem s tlist) || (StrMap.mem s tdict) then
-                            Type (s, 0)
+                            Type (Base s)
                          else 
-                             if List.mem ("s_" ^ s) tlist then Type ("s_" ^ s, 0)
+                             if List.mem ("s_" ^ s) tlist then Type (Base ("s_" ^ s))
                                                              else Identifier s)
       
   (* matcher looks at a string that represents a token and tries to determine
@@ -373,7 +386,7 @@ struct
       | "/" -> Slash
       | "/=" -> Equal (Some Slash)
       | "!" -> Bang
-      | "!=" -> Equal (Some Bang)
+      | "!=" -> NotEq
       | "~" -> Tilde
       | "%" -> Percent
       | "%=" -> Equal (Some Percent)
@@ -400,10 +413,18 @@ struct
       | "#use" -> Use 
       | _ -> matchRest (Utils.explode s) tdict tlist
 
+    let rec consolidate_types (ts : token list) (acc : token list) = match ts with
+        (Type t)::rest -> get_type_t rest t (fun (ty, rest') -> 
+            consolidate_types rest' ((Type ty)::acc))
+      | [] -> acc
+      | x::xs -> consolidate_types xs (x::acc)
+        
     (* lex finally lexes the entirety of the file. *)
     let lex (fileName : string) : token list * typeDict * string list =
         let slist = split fileName in
         let tdict = typedict_init slist (StrMap.empty) in
         let tlist = gen_typelist slist ["int"; "bool"; "void"; "string"; "char"] in
-        (List.map (fun s -> matcher s tdict tlist) slist, tdict, tlist)
+        let tokens = List.map (fun s -> matcher s tdict tlist) slist in
+        let types_parsed = consolidate_types tokens [] in
+        (List.rev types_parsed, tdict, tlist)
 end;;
