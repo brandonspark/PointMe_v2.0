@@ -12,6 +12,7 @@ module type UTILS =
     val take : 'a list -> int -> 'a list
     val dict_to_list : 'a StrMap.t -> (string * 'a) list
     val take_two : 'a list -> 'a * 'a
+    val print_blue : string -> unit
   end
 
 module Utils : UTILS =
@@ -86,5 +87,10 @@ module Utils : UTILS =
     let take_two (l : 'a list) = match l with
         x::y::xs -> (x, y)
       | _ -> failwith "Unable to take two from this list."
+
+    let print_blue (s : string) = 
+        let () = print_string "\027[94m" in 
+        let () = print_string s in 
+        print_string "\027[0m"
   end
 

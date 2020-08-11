@@ -8,7 +8,15 @@ type obj = CharObj of char
          | PtrObj of ty * (obj ref option)
          | ArrObj of ty * (obj Array.t option)
 
-and var = string * ty * obj
+let str_obj (o : obj) =
+    match o with
+    | CharObj c -> Format.sprintf "%c" c
+    | StrObj s -> s
+    | IntObj n -> Format.sprintf "%d" n 
+    | BoolObj b -> if b then "true" else "false"
+    | _ -> "[NOT SUPPORTED]"
+
+type var = string * ty * obj
 
 type assign = unit 
 type state = (line * assign list) list   (* list of previous lines + what they did *)
@@ -89,26 +97,28 @@ module Pratt =
         let stackRef = ref stack in
         let heapRef = ref heap in
 
+        let rec nud () =
+            let t = pop tokens in
+            match t with
+            | Identifier name -> Name name
+            | Const n -> Lit (IntObj n) 
+            | StrLit s -> Lit (StrObj s)
+            | ChrLit c -> Lit (CharObj c)
+            | Bool b -> Lit (BoolObj b)
+            | Bang | Tilde | Asterisk | Minus ->
+                let r_bp = prefix_bp t in
+                  UnOp (t, expr_bp r_bp)
+            | LParen -> let lhs = expr_bp 0 in 
+                        (match pop tokens with
+                        | RParen -> lhs (* recurse for one expression *)
+                        | _ -> failwith "Expected RParen.")
+            | _ -> raise (TokenError t)
+
         (* parse the first expression seen *)
-        let rec expr_bp (bp : int) =
+        and expr_bp (bp : int) =
 
             (* initially set lhs *)
-            let lhs = 
-                (let t = pop tokens in 
-                  match t with
-                | Identifier name -> Name name
-                | Const n -> Lit (IntObj n) 
-                | StrLit s -> Lit (StrObj s)
-                | ChrLit c -> Lit (CharObj c)
-                | Bool b -> Lit (BoolObj b)
-                | Bang | Tilde | Asterisk | Minus ->
-                  let r_bp = prefix_bp t in
-                    UnOp (t, expr_bp r_bp)
-                | LParen -> let lhs = expr_bp 0 in 
-                            (match pop tokens with
-                            | RParen -> lhs (* recurse for one expression *)
-                            | _ -> failwith "Expected RParen.")
-                | _ -> raise (TokenError t)) in
+            let lhs = nud () in 
              
             (* define expect *)
             let expect (t : token) = 
@@ -121,28 +131,26 @@ module Pratt =
                           | None -> raise (Break lhs)
                           | Some o -> o) in
                 
-                (match postfix_bp op with 
-                 | Some l_bp -> if l_bp < bp then raise (Break lhs)
-                    else (
-                    let _ = pop tokens in
-                    let lhs = 
-                        (match op with 
-                        | LBracket -> 
+                (match (postfix_bp op, infix_bp op) with 
+                 | (Some l_bp, _) -> 
+                      if l_bp < bp then raise (Break lhs)
+                      else
+                        let lhs = 
+                          (match pop tokens with 
+                          | LBracket -> 
                             let rhs = expr_bp 0 in
                             let () =  expect RBracket in
                                 main (ArrayAccess (lhs, rhs)) bp
-                        | LParen -> failwith "Unimplemented"
+                          | LParen -> failwith "Unimplemented"
                             (* do some function stuff here 
                              * basically, call expr_bp until you reach RParen,*
                              * ig *)) in
-                        raise (Continue (lhs, bp)))
-                 | _ ->
-                    (match infix_bp op with
-                     | Some (l_bp, r_bp) -> if l_bp < bp then raise (Break lhs)
-                        else ( 
-                        let _ = pop tokens in
+                        raise (Continue (lhs, bp))
+                 | (None, Some (l_bp, r_bp)) ->
+                     if l_bp < bp then raise (Break lhs)
+                     else
                         let lhs =
-                            (match op with
+                            (match pop tokens with
                             | QMark -> let mhs = expr_bp 0 in
                                        let () = expect Colon in
                                        let rhs = expr_bp 0 in
@@ -151,19 +159,37 @@ module Pratt =
                                                 let Lit (StrObj name) = rhs in
                                 main (if Period = op then (DotAccess (lhs, name))
                                                      else (ArrowAccess (lhs, name))) bp
-                            | _ -> let rhs = expr_bp r_bp in
-                                main (BinOp (op, lhs, rhs)) bp) in 
-                            raise (Continue (lhs, bp)))
-                     | _ -> raise (Break lhs))) in
+                            | _ -> main (BinOp (op, lhs, expr_bp r_bp)) bp) in 
+                        raise (Continue (lhs, bp))
+                | _ -> raise (Break lhs)) in
             (try main lhs bp with (Continue (ast, n)) -> main ast n
                                 | (Break ast) -> ast) in
         expr_bp 0
 
 
+
+    let rec str_pratt (a : ast) =
+          match a with
+          | BinOp (t, a1, a2) -> Format.sprintf "(%s %s %s)" (str_pratt a1)
+                                                (str_token t) (str_pratt a2)
+          | UnOp (t, a1) -> Format.sprintf "(%s %s)" (str_token t) (str_pratt a1)
+          | Call (s, l) -> 
+                Format.sprintf "%s(%s)" s
+                    (List.fold_right (fun a1 acc -> 
+                        Format.sprintf "%s, %s" (str_pratt a1) acc) l "")
+          | Name n -> Format.sprintf "\"%s\"" n
+          | Lit l -> str_obj l
+          | DotAccess (a1, s) -> Format.sprintf "%s.%s" (str_pratt a1) s
+          | ArrowAccess (a1, s) -> Format.sprintf "%s->%s" (str_pratt a1) s
+          | ArrayAccess (a1, a2) -> Format.sprintf "%s[%s]" (str_pratt a1) (str_pratt a2)
+          | Cond (c, a1, a2) -> Format.sprintf "(%s ? %s : %s)" (str_pratt c)
+                                               (str_pratt a1) (str_pratt a2) 
     let test (filename : string) = 
         let (tokens, typedict, typelist) = Lexer.lex filename in
         let (prev, next, stack, heap) = ([], [], StrMap.empty, StrMap.empty) in
-        calc (ref tokens) (StrMap.empty) (prev, next, stack, heap)
+        let a = calc (ref tokens) StrMap.empty (prev, next, stack, heap) in
+        let () = Utils.print_blue (str_pratt a) in let () = print_string "\n" in
+        a
 
     (*type lval = VID of var
               | Field of lval * string

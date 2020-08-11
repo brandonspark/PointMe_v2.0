@@ -5,6 +5,12 @@ type ty = Base of string
         | Ptr of ty
         | Array of ty (* name of type, and number of iterated pointers *)
 
+let rec str_ty (t : ty) =
+    match t with
+    | Base b -> b
+    | Ptr t -> Format.sprintf "%s*" (str_ty t)
+    | Array t -> Format.sprintf "%s[]" (str_ty t)
+
 (* yes, I'm aware it's an atrocious type. *)
 type token =
    | Identifier of string 
@@ -55,6 +61,47 @@ type token =
    | NotEq
    | Leq
    | Geq
+
+let rec str_token (t : token) =
+    let sp = Format.sprintf in
+    match t with
+    | Identifier n -> n
+    | StrLit s -> s
+    | ChrLit c -> sp "'%c'" c
+    | LibLit s -> sp "<%s>" s
+    | Const n -> sp "%d" n
+    | Bool b -> if b then "true" else "false"
+    | Type ty -> str_ty ty
+    | Struct -> "struct"
+    | Typedef -> "typedef"
+    | If -> "if"
+    | While -> "while"
+    | Else -> "else" 
+    | For -> "for"
+    | Continue -> "continue"
+    | Break -> "break"
+    | Return -> "return"
+    | Assert -> "assert"
+    | Error -> "error"
+    | NULL -> "NULL"
+    | Alloc -> "alloc"
+    | Alloc_array -> "alloc_array"
+    | Use -> "use"
+    | LParen -> "(" | RParen -> ")"
+    | LCurly -> "{" | RCurly -> "}"
+    | LBracket -> "[" | RBracket -> "]"
+    | Plus -> "+" | Minus -> "-"
+    | Asterisk -> "*" | Arrow -> "->"
+    | Equal (Some t) -> (str_token t) ^ "="
+    | Equal None -> "="
+    | Decrement -> "--" | Increment -> "++"
+    | Slash -> "/" | Bang -> "!" | Tilde -> "~" | Percent -> "%"
+    | RChevron -> ">" | LChevron -> "<"
+    | RShift -> ">>" | LShift -> "<<"
+    | Amper -> "&" | Caret -> "^" | Pipe -> "|"
+    | And -> "&&" | Or -> "||" | QMark -> "?" | Colon -> ":"
+    | Comma -> "," | Semicolon -> ";" | Period -> "." | EqEq -> "=="
+    | NotEq -> "!=" | Leq -> "<=" | Geq -> ">="
 
 (* countSymbol is a CPS function that counts the number of times that a
  * symbol appears in the prefix of a list, and calls sc on that number and
