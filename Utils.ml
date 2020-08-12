@@ -1,5 +1,11 @@
 module StrMap = Map.Make(String);;
 
+let convoluted_name f x = f x
+
+let (@$) = convoluted_name
+
+type 'a res = ('a, string) result
+
 module type UTILS =
   sig
     val explode : string -> char list
@@ -7,8 +13,9 @@ module type UTILS =
     val charToStr : char -> string
     val drop : 'a list -> int -> 'a list
     val dropR : 'a list -> int -> 'a list
-    val is_prefix : 'a list -> 'a list -> ('a list -> 'b) -> (unit -> 'b) -> 'b
-    val find_pair : 'a list -> ('a * 'a) -> ('a list * 'a list -> 'b) -> (unit -> 'b) -> 'b
+    val is_prefix : 'a list -> 'a list -> 'a list res
+    val find_end : 'a list -> ('a * 'a) -> ('a list * 'a list) res
+    val get_pair : 'a list -> ('a * 'a) -> ('a list * 'a list) res
     val take : 'a list -> int -> 'a list
     val dict_to_list : 'a StrMap.t -> (string * 'a) list
     val take_two : 'a list -> 'a * 'a
@@ -47,14 +54,13 @@ module Utils : UTILS =
     (* reverse drop function for lists that drops from the back *)
     let dropR l n = List.rev (drop (List.rev l) n)
 
-    let rec is_prefix (l1 : 'a list) (l2 : 'a list)
-                      (sc : 'a list -> 'b)
-                      (fc : unit -> 'b) = match (l1, l2) with
-        ([], []) -> sc []
-      | (x::xs, []) -> fc ()
-      | ([], x::xs) -> sc (x::xs)
-      | (x::xs, y::ys) -> if x = y then is_prefix xs ys sc fc
-                                   else fc ()
+    let rec is_prefix (l1 : 'a list) (l2 : 'a list) : 'a list res = 
+      match (l1, l2) with
+      | ([], []) -> Ok []
+      | (x::xs, []) -> Error "could not find prefix"
+      | ([], x::xs) -> Ok (x::xs)
+      | (x::xs, y::ys) -> if x = y then is_prefix xs ys
+                                   else Error "could not find prefix"
 
     let rec take l n = match Int.compare n 0 with
         -1 -> failwith "Negative input"
@@ -64,21 +70,37 @@ module Utils : UTILS =
               | x::xs -> x :: (take xs (n-1)))
       | _ -> failwith "take impossible"
 
-    let rec find_pair (l : 'a list) (right, left)
-                      (sc : 'a list * 'a list -> 'b)
-                      (fc : unit -> 'b) = 
-        let rec find_pair' l n acc = match (l, n) with
-                (_, 0) -> sc (List.rev acc, l)
-              | ([], n) -> fc ()
+    let rec find_end (l : 'a list) (left, right) : ('a list * 'a list) res = 
+        let rec find_end' l n acc = match (l, n) with
+                (_, 0) -> Ok (List.rev acc, l)
+              | ([], n) -> Error "could not find pair"
               | (x::xs, n) -> (match (x = right, x = left) with
-                    (true, _) ->
-                    find_pair' xs (n - 1) (x::acc)
-                  | (_, true) ->
-                    find_pair' xs (n + 1) (x::acc)
-                  | _ ->
-                    find_pair' xs n (x::acc))
+                    (true, _) -> find_end' xs (n - 1) (x::acc)
+                  | (_, true) -> find_end' xs (n + 1) (x::acc)
+                  | _ -> find_end' xs n (x::acc))
         in
-            find_pair' l 1 []
+            find_end' l 1 []
+
+    let rec get_pair (l : 'a list) (left, right) : ('a list * 'a list) res = 
+        let rec get_pair' (l : 'a list) (n : int) (mark : bool) (acc : 'a list) =
+            if mark then
+                (match (l, n) with
+                | (_, 0) -> Ok (List.rev acc, l)
+                | ([], _) -> Error "Did not find end of pair."
+                | (x::xs, _) -> 
+                    (match (x = left, x = right) with
+                    | (true, _) -> get_pair' xs (n + 1) true (x::acc)
+                    | (_, true) -> get_pair' xs (n - 1) true (x::acc)
+                    | _ -> get_pair' xs n true (x::acc)))
+                    else
+                (match (l, n) with
+                | ([], _) -> Error "Did not see left pair before running out."
+                | (x::xs, _) -> 
+                    (match (x = left, x = right) with
+                    | (true, _) -> get_pair' xs (n + 1) true (x::acc)
+                    | (_, true) -> Error "saw right pair first."
+                    | _ -> get_pair' xs n mark (x::acc))) in 
+        get_pair' l 0 false []
 
     let rec dict_to_list (d : 'a StrMap.t) =
         let seq = StrMap.to_seq d in
@@ -94,3 +116,12 @@ module Utils : UTILS =
         print_string "\027[0m"
   end
 
+
+let return (x : 'a) : 'a res = Ok x
+let bind (x : 'a res) (op : 'a -> 'b res) : 'b res = 
+    match x with
+    | Error x -> Error x
+    | Ok z -> op z
+
+let (>>=) = bind
+let (let*) x f = bind x f

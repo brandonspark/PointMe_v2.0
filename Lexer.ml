@@ -22,7 +22,7 @@ type token =
    | Type of ty
    | Struct
    | Typedef
-   | If | While | Else | For | Continue | Break | Return | Assert | Error
+   | If | While | Else | For | Continue | Break | Return | Assert | Error_t
    | NULL
    | Alloc | Alloc_array
    | Use
@@ -82,7 +82,7 @@ let rec str_token (t : token) =
     | Break -> "break"
     | Return -> "return"
     | Assert -> "assert"
-    | Error -> "error"
+    | Error_t -> "error"
     | NULL -> "NULL"
     | Alloc -> "alloc"
     | Alloc_array -> "alloc_array"
@@ -106,45 +106,48 @@ let rec str_token (t : token) =
 (* countSymbol is a CPS function that counts the number of times that a
  * symbol appears in the prefix of a list, and calls sc on that number and
  * the remainder of the list. *)
-let rec count_symbol (ss : string list) (target : string)
-                     (sc : int * string list -> 'a) = match ss with
-    [] -> sc (0, [])
-  | x::xs -> if x = target then 
-      count_symbol xs target (fun (n, l) -> sc (n + 1, l))
-                           else sc (0, x::xs)
+let rec count_symbol (ss : string list) (target : string) : (int * string list) res = 
+    match ss with
+    | [] -> Ok (0, [])
+    | x::xs -> if x = target then 
+                    let* (n, l) = (count_symbol xs target) in Ok (n + 1, l)
+                             else Ok (0, x::xs)
 
 (* find_symbol is a CPS function that finds the first occurrence of some
  * character in a list, then returns the list to the left of it, inclusive on
  * the symbol, as well as the list to the right of the symbol *)
-let rec find_symbol (l : 'a list) (target : 'a) (acc : 'a list)
-                    (sc : 'a list * 'a list -> 'b) (fc : unit -> 'b) = match l with
-            [] -> fc ()
-          | x::xs -> if x = target then sc (List.rev (x::acc), xs)
-                                   else find_symbol xs target (x::acc) sc fc
+let rec find_symbol (l : 'a list) (target : 'a) : ('a list * 'a list) res =
+    let rec find_symbol' (l : 'a list) (target : 'a) (acc : 'a list) =
+        match l with
+        | [] -> Error "Could not find symbol."
+        | x::xs -> if x = target then Ok (List.rev (x::acc), xs)
+                                  else find_symbol' xs target (x::acc) in
+    find_symbol' l target []
 
 (* find_symbols is a CPS function that finds the first occurrence of some
  * sequnece of symbols in a list, then returns the list to the left of it,
  * inclusive on the sequence of symbols, as well as the list to the right of the
  * sequence. *)
-let rec find_symbols (l : 'a list) (targets : 'a list)
-                     (sc : 'a list * 'a list -> 'b) (fc : unit -> 'b) = match (l, targets) with
-            ([], []) -> sc ([], [])
-          | (x::xs, []) -> sc ([], x::xs)
-          | (_, y::ys) -> find_symbol l y [] (fun (pre, rest) ->
-                            Utils.is_prefix ys rest (fun post -> sc (pre @ ys, post)) fc) fc
+let rec find_symbols (l : 'a list) (targets : 'a list) : ('a list * 'a list) res = 
+    match (l, targets) with
+    | ([], []) -> Ok ([], [])
+    | (x::xs, []) -> Ok ([], x::xs)
+    | (_, y::ys) -> let* (pre, rest) = (find_symbol l y) in
+                    let* post = Utils.is_prefix ys rest in
+                    return (pre @ ys, post)
 
 module type LEXER =
   sig
     type typeDict
     val programToString : string -> string
     val split : string -> string list        
-    val typedict_init : string list -> typeDict -> typeDict
-    val gen_typelist : string list -> string list -> string list
-    val lex : string -> token list * typeDict * string list 
+    val typedict_init : string list -> typeDict -> typeDict res 
+    val gen_typelist : string list -> string list -> string list res
+    val lex : string -> (token list * typeDict * string list) res  
   end
 
 module Lexer : LEXER =
-struct
+  struct
 
     type typeDict = ty StrMap.t
 
@@ -287,36 +290,39 @@ struct
                 "" -> ss
               | _ -> s::ss
 
-    let rec get_type (ss : string list) (acc : ty) (sc : ty * string list -> 'a) : 'a = match ss with
-        "*"::xs -> get_type xs (Ptr acc) sc 
-      | "["::"]"::xs -> get_type xs (Array acc) sc 
-      | _ -> sc (acc, ss)
+    let rec get_type (ss : string list) (acc : ty) : (ty * string list) res = 
+        match ss with
+        "*"::xs -> get_type xs (Ptr acc)
+      | "["::"]"::xs -> get_type xs (Array acc)
+      | _ -> Ok (acc, ss)
     
-    let rec get_type_t (ts : token list) (acc : ty) (sc : ty * token list -> 'a) : 'a = match ts with
-        Asterisk::xs -> get_type_t xs (Ptr acc) sc 
-      | LBracket::RBracket::xs -> get_type_t xs (Array acc) sc 
-      | _ -> sc (acc, ts)
+    let rec get_type_t (ts : token list) (acc : ty) : (ty * token list) res = 
+      match ts with
+        Asterisk::xs -> get_type_t xs (Ptr acc) 
+      | LBracket::RBracket::xs -> get_type_t xs (Array acc)
+      | _ -> Ok (acc, ts)
 
     (* typedict_init, given a string list of the separated tokens, adds all the
      * relationships created by typedefs in the program. It maps the new names
      * to the old names. Notably, if the old name was a struct, the canonical
      * name of that type has a "s_" prepended to it. *)
-    let rec typedict_init (ss : string list) (d : typeDict) : typeDict = match ss with
-        [] -> d
+    let rec typedict_init (ss : string list) (d : typeDict) : typeDict res = 
+      match ss with
+      | [] -> Ok d
       | "typedef"::"struct"::oldname::rest ->
-            get_type rest (Base ("s_" ^ oldname)) (fun (ty, rest1) ->
-                match rest1 with
-                    [] -> failwith "No name for typedef."
-                  | newname::rest2 -> find_symbol rest2 ";" []
-                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname ty d))
-                    (fun () -> failwith "Unable to find semicolon."))
+            let* (ty, rest1) = get_type rest (Base ("s_" ^ oldname)) in
+            (match rest1 with
+            | [] -> Error "Nothing after the type."
+            | newname::rest2 -> 
+                let* (_, rest3) = find_symbol rest2 ";" in
+                typedict_init rest3 (StrMap.add newname ty d))
       | "typedef"::oldname::rest -> 
-            get_type rest (Base oldname) (fun (ty, rest1) ->
-                match rest1 with
-                    [] -> failwith "No name for typedef."
-                  | newname::rest2 -> find_symbol rest2 ";" []
-                    (fun (_, rest3) -> typedict_init rest3 (StrMap.add newname ty d))
-                    (fun () -> failwith "Unable to find semicolon."))
+            let* (ty, rest1) = get_type rest (Base oldname) in
+            (match rest1 with
+            | [] -> Error "No type to typedef to."
+            | newname::rest2 -> 
+                let* (_, rest3) = find_symbol rest2 ";" in
+                typedict_init rest3 (StrMap.add newname ty d))
       | x::xs -> typedict_init xs d
 
     (* gen_typelist, give a string list of the separated tokens in the program,
@@ -324,14 +330,13 @@ struct
      * prepended form to an accumulator list. these effectively form the set of
      * "canonical types" for the program, that are their own most simplified
      * forms. *)
-    let rec gen_typelist (ss : string list) (acc : string list) : string list = match ss with
-        [] -> acc
+    let rec gen_typelist (ss : string list) (acc : string list) : string list res = match ss with
+        [] -> Ok acc
       | "struct"::sid::"{"::rest -> 
-              find_symbol rest "}" [] (fun (_, rest') -> 
-                (match rest' with
-                  ";"::rest'' -> gen_typelist rest'' (("s_" ^ sid)::acc)
-                | _ -> failwith "Did not find semicolon after right curly.\n"))
-                (fun () -> failwith "Could not find right curly.\n")
+            let* (_, rest') = find_symbol rest "}" in
+            (match rest' with
+            | ";"::rest'' -> gen_typelist rest'' (("s_" ^ sid)::acc)
+            | _ -> Error "Did not find semicolon after right curly.\n")
       | "struct"::sid::";"::rest -> gen_typelist rest (("s_" ^ sid)::acc)
       | x::xs -> gen_typelist xs acc
 
@@ -401,7 +406,7 @@ struct
                   | "NULL" -> NULL
                   | "alloc" -> Alloc
                   | "alloc_array" -> Alloc_array 
-                  | "error" -> Error
+                  | "error" -> Error_t
                   | _ -> if (List.mem s tlist) || (StrMap.mem s tdict) then
                             Type (Base s)
                          else 
@@ -461,17 +466,18 @@ struct
       | _ -> matchRest (Utils.explode s) tdict tlist
 
     let rec consolidate_types (ts : token list) (acc : token list) = match ts with
-        (Type t)::rest -> get_type_t rest t (fun (ty, rest') -> 
-            consolidate_types rest' ((Type ty)::acc))
-      | [] -> acc
+        (Type t)::rest -> 
+            let* (ty, rest') = get_type_t rest t in
+            consolidate_types rest' ((Type ty)::acc)
+      | [] -> Ok acc
       | x::xs -> consolidate_types xs (x::acc)
         
     (* lex finally lexes the entirety of the file. *)
-    let lex (fileName : string) : token list * typeDict * string list =
+    let lex (fileName : string) : (token list * typeDict * string list) res =
         let slist = split fileName in
-        let tdict = typedict_init slist (StrMap.empty) in
-        let tlist = gen_typelist slist ["int"; "bool"; "void"; "string"; "char"] in
+        let* tdict = typedict_init slist (StrMap.empty) in
+        let* tlist = gen_typelist slist ["int"; "bool"; "void"; "string"; "char"] in
         let tokens = List.map (fun s -> matcher s tdict tlist) slist in
-        let types_parsed = consolidate_types tokens [] in
-        (List.rev types_parsed, tdict, tlist)
+        let* types_parsed = consolidate_types tokens [] in
+        return @@ (List.rev types_parsed, tdict, tlist)
 end;;
