@@ -63,9 +63,9 @@ module Parser =
             runState ts @@
             let+ cond    = get_pair (LParen, RParen) in
             let+ if_stmt = stmt_construct in
-            let+ state   = get in 
-            (match state with
-            | Else::xs' -> 
+            let+ next    = peek in 
+            (match next with
+            | Else -> 
                 let+ _         = pop in
                 let+ else_stmt = stmt_construct in
                 return_both (IfStmt (cond, if_stmt, Some (else_stmt)))

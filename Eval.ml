@@ -30,6 +30,8 @@ type state = (line * assign list) list   (* list of previous lines + what they d
 
 module Pratt =
   struct
+    open ListStateResMonad
+
     type ast = BinOp of token * ast * ast
              | UnOp of token * ast
              | Call of string * ast list
@@ -71,118 +73,112 @@ module Pratt =
     exception Break of ast 
     exception Continue of ast * int
 
-    (* set up the AST, then break it *)
-    let pop (ts : token list) : (token * token list) res =
-        match ts with
-        | x::xs -> Ok (x, xs)
-        | _ -> Error "Cannot pop from empty list."
-    
-    let peek (ts : token list) : token res =
-        match ts with
-        | x::xs -> Ok x
-        | _ -> Error "Cannot peek from empty list."
+    let expectID : (string, token) m =
+        fun ts ->
+        runState ts @@
+        let+ state = get in
+        match state with
+        | (Identifier name)::rest -> return_both name
+        | _ -> return_err "Did not get an identifier next."
 
-    let expect (t : token) (ts : token list) : token list res = 
-        let* (res, rest) = pop ts in
-        if res = t then Ok rest
-                   else Error "Not what was expected"
-
-    let expectID (ts : token list) : (string * token list) res =
-        match pop ts with
-        | Ok (Identifier name, rest) -> Ok (name, rest)
-        | Error e -> Error "Did not get an identifier next."
-
-    let rec get_args_list (ts : token list) (acc : ast list) : ast list res =
+    let rec get_args_list (acc : ast list) : (ast list, token) m =
+        fun ts ->
         match ts with
-        | [RParen] -> Ok (List.rev acc)
-        | x::xs -> 
-            let* (ast, after_ts) = expr_bp 0 ts in
-            get_args_list after_ts (ast::acc)
+        | [RParen] -> Ok (List.rev acc, [])
+        | x::xs ->
+            runState (x::xs) @@
+            let+ ast = expr_bp 0 in
+            eval return_both @@ get_args_list (ast::acc)
         | _ -> Error "Did not find an RParen at the end of function call."   
 
     (* nud, given a token list, returns Ok (lhs, rest), where
      * lhs is the first standalone expression found with no left-context,
      * and rest is the rest of the tokens that follow it *)
-    and nud (ts : token list) : (ast * token list) res =
-        let* (t, rest) = pop ts in 
+    and nud : (ast, token) m =
+        fun ts ->
+        runState ts @@
+        let+ t = pop in 
         match t with
-        | Identifier name -> 
-            (*let* (t, after_ts) = pop ts in
-            (match t with
-            | LParen -> 
-                let* (pre, post) = Utils.find_end after_ts (LParen, RParen) in
-                let* args = get_args_list pre [] in
-                Ok (Call (name, args), post)
-            | _ -> *)Ok (Name name, rest)
-        | Const n -> Ok (Lit (IntObj n), rest)
-        | StrLit s -> Ok (Lit (StrObj s), rest) 
-        | ChrLit c -> Ok (Lit (CharObj c), rest)
-        | Bool b -> Ok (Lit (BoolObj b), rest)
+        | Identifier name -> return_both @@ Name name
+        | Const n -> return_both @@ Lit (IntObj n)
+        | StrLit s -> return_both @@ Lit (StrObj s) 
+        | ChrLit c -> return_both @@ Lit (CharObj c)
+        | Bool b -> return_both @@ Lit (BoolObj b)
         | Bang | Tilde | Asterisk | Minus ->
             let r_bp = prefix_bp t in
-            let* (hs, rest_ts) = expr_bp r_bp rest in
-            Ok (UnOp (t, hs), rest_ts)
+            let+ hs  = expr_bp r_bp in
+            return_both @@ UnOp (t, hs)
         | LParen -> 
-            let* (lhs, rest') = expr_bp 0 rest in 
-            let* final_ts = expect RParen rest' in
-            Ok (lhs, final_ts) (* recurse for one expression *)
-        | _ -> Error "No tokens left"
+            let+ lhs = expr_bp 0 in 
+            let+ _   = expect RParen in
+            return_both lhs (* recurse for one expression *)
+        | _ -> return_err "No tokens left"
 
     (* led, given an AST, binding power, and token list, searches the token
      * list, constructing an AST according to the left context of the LHS,
      * until it runs out. If it reaches something with a higher binding
      * power, it backtracks. *)
-    and led (lhs : ast) (bp: int) (ts : token list) : (ast * token list) res =
-        match pop ts with
-        | Error _ -> Ok (lhs, ts)
-        | Ok (op, init_ts) -> 
+    and led (lhs : ast) (bp: int) : (ast, token) m =
+        fun ts ->
+        runState ts @@
+        let+ state = get in
+        match state with
+        | [] -> return_both lhs
+        | op::_ -> 
             (match (postfix_bp op, infix_bp op) with 
             | (Some l_bp, _) -> 
-                if l_bp < bp then Ok (lhs, ts)
+                if l_bp < bp then return_both lhs
                 else
-                    let* (new_lhs, final_ts) = 
+                    let+ _       = pop in 
                     (match op with 
                     (* For array indexing, like var[10] *)
-                    | LBracket ->
-                        let* (rhs, rhs_ts) = expr_bp 0 init_ts in
-                        let* expected_ts = expect RBracket rhs_ts in
-                        led (ArrayAccess (lhs, rhs)) bp expected_ts
+                    | LBracket -> 
+                        let+ rhs     = expr_bp 0 in
+                        let+ _       = expect RBracket in
+                        let+ new_lhs = led (ArrayAccess (lhs, rhs)) bp in
+                        eval return_both @@ led new_lhs bp
                     (* For function calls, like f(x, y, z) *)
                     | LParen -> 
                         (match lhs with
                         | Name name ->
-                            let* (pre, post) = Utils.find_end init_ts (LParen, RParen) in
-                            let* args = get_args_list pre [] in
-                            led (Call (name, args)) bp post 
-                        | _ -> Error "LParen found after non-name")
+                            let+ arglist = find_end (LParen, RParen) in
+                            let+ args    = suspend arglist @@ get_args_list [] in
+                            let+ new_lhs = led (Call (name, args)) bp in 
+                            eval return_both @@ led new_lhs bp
+                        | _ -> return_err "LParen found after non-name")
                     (* Every other postfix - shouldn't exist. *)
-                    | _ -> Error "shouldn't error here, only two postfix") in
-                    led new_lhs bp final_ts
+                    | _ -> return_err "shouldn't error here, only two postfix")
+                    
             | (None, Some (l_bp, r_bp)) ->
-                if l_bp < bp then Ok (lhs, ts)
+                if l_bp < bp then return_both lhs
                 else
+                    let+ _ = pop in 
                     (match op with
                     (* For parsing expressions like x ? y : z *)
                     | QMark -> 
-                        let* (mhs, mhs_ts)  = expr_bp 0 init_ts in
-                        let* expected_ts = expect Colon mhs_ts in
-                        let* (rhs, rhs_ts) = expr_bp 0 expected_ts in
-                        led (Cond (lhs, mhs, rhs)) bp rhs_ts
+                        let+ mhs = expr_bp 0 in
+                        let+ _   = expect Colon in
+                        let+ rhs = expr_bp 0 in
+                        let+ new_lhs = led (Cond (lhs, mhs, rhs)) bp in
+                        eval return_both @@ led new_lhs bp
                     (* For parsing field dereferences, like var.field or * var->field *)
                     | Period | Arrow ->
-                        let* (name, after_ts) = expectID init_ts in
+                        let+ name = expectID in
+                        eval return_both @@
                         led (if Period = op then (DotAccess (lhs, name))
-                                             else (ArrowAccess (lhs, name))) bp after_ts
+                                             else (ArrowAccess (lhs, name))) bp
                     (* Every other infix operator is a BinOp *)
                     | _ -> 
-                        let* (rhs, final_ts) = expr_bp r_bp init_ts in 
-                        led (BinOp (op, lhs, rhs)) bp final_ts)
-            | _ -> Ok (lhs, ts))
+                        let+ rhs = expr_bp r_bp in 
+                        eval return_both @@ led (BinOp (op, lhs, rhs)) bp)
+            | _ -> return_both lhs)
     
     (* parse the first expression seen *)
-    and expr_bp (bp : int) (ts : token list) : (ast * token list) res =
-        let* (lhs, ts1) = nud ts in 
-        led lhs bp ts1
+    and expr_bp (bp : int) : (ast, token) m =
+        fun ts ->
+        runState ts @@ 
+        let+ lhs = nud in
+        eval return_both @@ led lhs bp
 
     let rec str_pratt (a : ast) =
         match a with
@@ -202,20 +198,23 @@ module Pratt =
         | ArrayAccess (a1, a2) -> Format.sprintf "%s[%s]" (str_pratt a1) (str_pratt a2)
         | Cond (c, a1, a2) -> Format.sprintf "(%s ? %s : %s)" (str_pratt c)
                                              (str_pratt a1) (str_pratt a2) 
-    let test (filename : string) = 
-        let* (tokens, typedict, typelist) = Lexer.lex filename in
-        let (prev, next, stack, heap) = ([], [], StrMap.empty, StrMap.empty) in
-        let* (a, rest) = expr_bp 0 tokens in
-        let () = Utils.print_blue (str_pratt a) in 
-        let () = print_string "\n" in
-        Ok (a, rest)
+    
+    open ResultMonad
 
-    let test2 (thing : string) =
+    let test (filename : string) = 
+        let* (tokens, typedict, typelist, sinfo) = Lexer.lex filename in
+        let (prev, next, stack, heap) = ([], [], StrMap.empty, StrMap.empty) in
+        let* ast = runState tokens @@ expr_bp 0 in
+        let () = Utils.print_blue (str_pratt ast) in 
+        let () = print_string "\n" in
+        Ok ast
+
+    (*let test2 (thing : string) =
         let* (tokens, _, _) = Lexer.lex thing in
         let* (a, rest) = expr_bp 0 tokens in
-        Ok (a, rest)
+        Ok (a, rest)*)
   end
-
+(*
 module Eval = 
   struct
     
@@ -226,7 +225,6 @@ module Eval =
         let rec eval_statement (ast : statement)
                                ((prev, next, stack, heap) : state) = match ast with
             SimpleStmt line -> 
-
           | IfStmt (cond, code, el) ->
           | WhileStmt (cond, code) ->
           | ForStmt (line, code) ->
@@ -268,4 +266,4 @@ module Eval =
 
         *)
 
-  end
+  end*)

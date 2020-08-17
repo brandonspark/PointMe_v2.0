@@ -42,10 +42,17 @@ module ListStateResMonad =
   struct
     type 'a state = 'a list
     type ('v, 'a) m = 'a state -> ('v * 'a state) res
+
+    (* returns a monadic computation that will return the input *)
     let return (x : 'v) : ('v, 'a) m = fun s -> Ok (x, s)
+    
+    (* gets you the state *)
     let get : ('a state, 'a) m = fun s -> Ok (s, s)
+
+    (* replaces the state *)
     let put (s : 'a state) : (unit, 'a) m = fun s' -> Ok ((), s)
 
+    (* bind. *)
     let bind (x : ('v, 'a) m) (f : 'v -> ('b, 'a) m) : ('b, 'a) m =
         fun initState ->
             match x initState with 
@@ -57,10 +64,16 @@ module ListStateResMonad =
     let (>>=) = bind
     let (let+) x f = bind x f
 
+    (* return_both evals to a monadic computation whose value is both input and state *)
     let return_both (x : 'v) : ('v * 'a state, 'a) m = fun s -> Ok ((x, s), s)
+
+    (* return_opt unpacks a res and is a comp. whose value is that res' value *)
     let return_opt (x : 'v res) : ('v, 'a) m = 
         fun s -> ResultMonad.(>>=) x (fun v -> Ok (v, s))
     
+    let return_err (s : string) : ('b, 'a) m = fun _ -> Error s
+    
+    (* opt_bind f if the input is an Ok *)
     let opt_bind (x : 'v res) (f : 'v -> ('b, 'a) m) : ('b, 'a) m =
         fun s ->
         match x with 
@@ -69,11 +82,17 @@ module ListStateResMonad =
             let newComputation = f v in
             newComputation s
 
+    (* eval will use a mode (return, return_both) and a monad and just
+     * return the result of the monad using that mode *)
     let eval (mode : 'v -> ('b, 'a) m) (x : ('v, 'a) m) =
         x >>= (fun res -> mode res)
+
+    (* runState takes in a state and monad and returns the monad's result *)
     let runState (s : 'a state) (p : ('v, 'a) m) : 'v res = 
         ResultMonad.(>>=) (p s) (fun (v, s) -> Ok v)
 
+    (* suspend ignores the current state and does a monad's computation with a
+     * state given as parameter, then puts the current state back *)
     let suspend (s : 'a state) (p : ('v, 'a) m) : ('v, 'a) m =
         fun initState ->
             match p s with
@@ -91,6 +110,11 @@ module ListStateResMonad =
         function 
         | [] -> Error "Cannot pop from empty list."
         | x::xs -> Ok (x, xs)
+
+    let peek : ('a, 'a) m =
+        function
+        | [] -> Error "Canont peek from empty list"
+        | x::xs -> Ok (x, x::xs)
 
     let cons : ('a * 'a state, 'a) m =
         function
