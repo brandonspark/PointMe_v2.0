@@ -4,6 +4,7 @@ type obj = CharObj of char
          | IntObj of int
          | StrObj of string
          | BoolObj of bool
+         | VoidObj
          | StructObj of ty * ((string * obj) list)
          | PtrObj of ty * (obj ref option)
          | ArrObj of ty * (obj Array.t option)
@@ -18,10 +19,12 @@ let str_obj (o : obj) =
 
 type var = string * ty * obj
 
-type assign = unit 
+type assign = Add of var option * var option
+            | Replace of var option StrMap.t * var option StrMap.t
+
 type state = (line * assign list) list   (* list of previous lines + what they did *)
            * (line * assign list) list   (* list of next lines + what they do *)
-           * var StrMap.t                (* map keeping stack data *)
+           * var option StrMap.t         (* map keeping stack data *)
            * obj ref StrMap.t            (* map keeping heap data *)
 
 
@@ -44,7 +47,7 @@ module Pratt =
 
     let infix_bp (t : token) =
         match t with
-        | LParen | Arrow | Period -> Some (25, 26)
+        | Arrow | Period -> Some (25, 26)
         | Asterisk | Slash | Percent -> Some (21, 22)
         | Plus | Minus -> Some (19, 20)
         | LShift | RShift -> Some (17, 18)
@@ -67,11 +70,6 @@ module Pratt =
 
     exception Break of ast 
     exception Continue of ast * int
-    let infix = [Arrow; Period; Asterisk; Slash; Percent; Plus; Minus; LShift; RShift;
-                 LChevron; Leq; Geq; RChevron; EqEq; NotEq; Amper; Caret; Pipe;
-                 And; Or; QMark; Colon]
-
-    let postfix = [LParen; LBracket]
 
     (* set up the AST, then break it *)
     let pop (ts : token list) : (token * token list) res =
@@ -100,9 +98,7 @@ module Pratt =
         | x::xs -> 
             let* (ast, after_ts) = expr_bp 0 ts in
             get_args_list after_ts (ast::acc)
-        | _ -> Error "Did not find an RParen at the end of function call."
-
-    
+        | _ -> Error "Did not find an RParen at the end of function call."   
 
     (* nud, given a token list, returns Ok (lhs, rest), where
      * lhs is the first standalone expression found with no left-context,
@@ -141,15 +137,17 @@ module Pratt =
         | Error _ -> Ok (lhs, ts)
         | Ok (op, init_ts) -> 
             (match (postfix_bp op, infix_bp op) with 
-            | (Some l_bp, _) -> (* for postfix operators *)
-                if l_bp < bp then Ok (lhs, ts) (* precedence, return what we have *)
+            | (Some l_bp, _) -> 
+                if l_bp < bp then Ok (lhs, ts)
                 else
                     let* (new_lhs, final_ts) = 
                     (match op with 
+                    (* For array indexing, like var[10] *)
                     | LBracket ->
                         let* (rhs, rhs_ts) = expr_bp 0 init_ts in
                         let* expected_ts = expect RBracket rhs_ts in
                         led (ArrayAccess (lhs, rhs)) bp expected_ts
+                    (* For function calls, like f(x, y, z) *)
                     | LParen -> 
                         (match lhs with
                         | Name name ->
@@ -157,24 +155,25 @@ module Pratt =
                             let* args = get_args_list pre [] in
                             led (Call (name, args)) bp post 
                         | _ -> Error "LParen found after non-name")
-                    | _ -> Error "shouldn't error here, only two postfix"
-                    (* do some function stuff here 
-                     * basically, call expr_bp until you reach RParen,*
-                     * ig *)) in
+                    (* Every other postfix - shouldn't exist. *)
+                    | _ -> Error "shouldn't error here, only two postfix") in
                     led new_lhs bp final_ts
             | (None, Some (l_bp, r_bp)) ->
                 if l_bp < bp then Ok (lhs, ts)
                 else
                     (match op with
-                    | QMark -> (* x ? y : z *)
+                    (* For parsing expressions like x ? y : z *)
+                    | QMark -> 
                         let* (mhs, mhs_ts)  = expr_bp 0 init_ts in
                         let* expected_ts = expect Colon mhs_ts in
                         let* (rhs, rhs_ts) = expr_bp 0 expected_ts in
                         led (Cond (lhs, mhs, rhs)) bp rhs_ts
-                    | Period | Arrow -> (* x.field, x->field *)
+                    (* For parsing field dereferences, like var.field or * var->field *)
+                    | Period | Arrow ->
                         let* (name, after_ts) = expectID init_ts in
                         led (if Period = op then (DotAccess (lhs, name))
                                              else (ArrowAccess (lhs, name))) bp after_ts
+                    (* Every other infix operator is a BinOp *)
                     | _ -> 
                         let* (rhs, final_ts) = expr_bp r_bp init_ts in 
                         led (BinOp (op, lhs, rhs)) bp final_ts)
@@ -182,28 +181,27 @@ module Pratt =
     
     (* parse the first expression seen *)
     and expr_bp (bp : int) (ts : token list) : (ast * token list) res =
-        (* initially set lhs *)
         let* (lhs, ts1) = nud ts in 
         led lhs bp ts1
 
     let rec str_pratt (a : ast) =
-          match a with
-          | BinOp (t, a1, a2) -> Format.sprintf "(%s %s %s)" (str_pratt a1)
-                                                (str_token t) (str_pratt a2)
-          | UnOp (t, a1) -> Format.sprintf "(%s %s)" (str_token t) (str_pratt a1)
-          | Call (s, l) -> 
-                Format.sprintf "%s(%s)" s
-                    (let interior = 
-                        (List.fold_right (fun a1 acc -> 
-                        Format.sprintf "%s, %s" (str_pratt a1) acc) l "") in
-                    String.sub interior 0 (String.length interior - 2))
-          | Name n -> Format.sprintf "\"%s\"" n
-          | Lit l -> str_obj l
-          | DotAccess (a1, s) -> Format.sprintf "%s.%s" (str_pratt a1) s
-          | ArrowAccess (a1, s) -> Format.sprintf "%s->%s" (str_pratt a1) s
-          | ArrayAccess (a1, a2) -> Format.sprintf "%s[%s]" (str_pratt a1) (str_pratt a2)
-          | Cond (c, a1, a2) -> Format.sprintf "(%s ? %s : %s)" (str_pratt c)
-                                               (str_pratt a1) (str_pratt a2) 
+        match a with
+        | BinOp (t, a1, a2) -> Format.sprintf "(%s %s %s)" (str_pratt a1)
+                                              (str_token t) (str_pratt a2)
+        | UnOp (t, a1) -> Format.sprintf "(%s %s)" (str_token t) (str_pratt a1)
+        | Call (s, l) -> 
+            Format.sprintf "%s(%s)" s
+                (let interior = 
+                    (List.fold_right (fun a1 acc -> 
+                    Format.sprintf "%s, %s" (str_pratt a1) acc) l "") in
+                String.sub interior 0 (String.length interior - 2))
+        | Name n -> Format.sprintf "\"%s\"" n
+        | Lit l -> str_obj l
+        | DotAccess (a1, s) -> Format.sprintf "%s.%s" (str_pratt a1) s
+        | ArrowAccess (a1, s) -> Format.sprintf "%s->%s" (str_pratt a1) s
+        | ArrayAccess (a1, a2) -> Format.sprintf "%s[%s]" (str_pratt a1) (str_pratt a2)
+        | Cond (c, a1, a2) -> Format.sprintf "(%s ? %s : %s)" (str_pratt c)
+                                             (str_pratt a1) (str_pratt a2) 
     let test (filename : string) = 
         let* (tokens, typedict, typelist) = Lexer.lex filename in
         let (prev, next, stack, heap) = ([], [], StrMap.empty, StrMap.empty) in
@@ -212,103 +210,62 @@ module Pratt =
         let () = print_string "\n" in
         Ok (a, rest)
 
-    (*type lval = VID of var
-              | Field of lval * string
-              | Deref of lval
-              | Arrow of lval * string
-              | Index of lval * ast
-    *)
-
+    let test2 (thing : string) =
+        let* (tokens, _, _) = Lexer.lex thing in
+        let* (a, rest) = expr_bp 0 tokens in
+        Ok (a, rest)
   end
 
-(*module Eval = 
+module Eval = 
   struct
     
-    let rec init_var (t_obj : ty) (name : string) (rest : line) 
-                     ((prev, next, stack, heap) : state) =
-        match t_obj with
-            Base t -> 
-          | Ptr t ->
-          | Array t -> match line with
-                         [Semicolon] -> StrMap.add name (name, t_obj, ArrObj None) 
-                         (Equal asn)::rest' -> 
-
-    let rec apply (operator : token) (first : obj) (second : obj) = match token with
-        
-
-    (* input the reversed queue - it is now a stack *)
-    let rec rpn_eval (ts : tok list) (acc : tok list) = match ts with
-        (Operator o)::xs -> let (second, first) = Utils.take_two acc in
-            
-      | 
-
-
-    let rec eval_function (funcname: string) (args : var list) (funcmap : func StrMap.t)
-                          ((prev, next, stack, heap): state) =
-        let ast = StrMap.find funcname funcmap in
-
-        (* eval arguments *) 
-        let stack = List.fold_left (fun s (name, t, obj) -> 
-            StrMap.add name (name, t, obj) s) stack args in
-
-        (* find the first syntactic expression. *)
-        let rec find_exp (line : line) 
-                         (sc : line * line -> 'a) 
-                         (fc : unit -> 'a) : 'a = 
-          match line with
-            LParen::rest -> Utils.find_pair line (RParen, LParen) (fun (pre, post) -> 
-                sc (pre, post)) fc
-          | (Const n)::xs | (StrLit s)::xs | (ChrLit c)::xs | (Bool b)::xs |
-            NULL::xs -> let first::rest = line in sc ([first], rest)
-          | Bang::xs | Tilde::xs | Asterisk::xs -> let first::rest = line in
-                find_exp rest (fun (exp, post) -> sc (first::exp, post)) fc
-          | (Identifier name)::LParen::xs ->
-                  Utils.find_pair xs (RParen, LParen) (fun (pre, post) ->
-                      sc ((Identifier name)::LParen::pre, post)) fc
-          | [Alloc; LParen; Type t; RParen] -> sc (line, [])
-          | Alloc_array::LParen::xs ->
-                  Utils.find_pair xs (RParen, LParen) (fun (pre, post) ->
-                      sc (Alloc_array::LParen::pre, post)) fc
-          | (Identifier name)::xs -> sc ([Identifier name], xs)
-          | 
-
-        let rec eval_expression (line : line) ((prev, next, stack, heap) as v_state : state)
-                                (s : tok list) (q : tok list)
-                                (sc : line * state * tok list * tok list -> 'a) =
-            match line with  
-                (StrLit str)::xs ->
-                    shunting_yard xs s ((Obj (StrObj s))::q) v_state
-              | (ChrLit c)::xs ->
-                    shunting_yard xs s ((Obj (ChrObj c))::q) v_state
-              | (Const n)::xs ->
-                    shunting_yard xs s ((Obj (IntObj n))::q) v_state 
-              | (Bool b)::xs ->
-                    shunting_yard xs s ((Obj (BoolObj b))::q) v_state
-              | (NULL)::xs -> 
-                    shunting_yard xs s (Obj (PtrObj (Ptr (Base "void"), None))) v_state
-              | (Bang::rest) | (Tilde::rest) | (Asterisk::rest) -> 
-
-              | [Alloc; LParen; Type t; RParen] -> 
-              | Alloc_array::LParen::rest -> 
-              | (Identifier name)::LParen::xs -> (* function call *)
-                      
+    let rec eval_program (filename : string) : 'a =
+        let* (ts, tdict, tlist, sinfo) = Lexer.lex filename in
+        let* funcmap = Parser.gen_function_pool ts in
 
         let rec eval_statement (ast : statement)
                                ((prev, next, stack, heap) : state) = match ast with
-            SimpleStmt line ->
+            SimpleStmt line -> 
 
           | IfStmt (cond, code, el) ->
           | WhileStmt (cond, code) ->
           | ForStmt (line, code) ->
           | BlockStmt l ->
 
-        let rec eval_line (line : line) ((prev, next, stack, heap) : state) = match line with 
-            (Type ty)::(Identifier name)::rest ->
+        (* returns Ok of the empty object, uninitialized *)
+        let init_var (t : ty) (name : string) : var res = 
+            (* if you can reduce the type, then the type is valid. *)
+            let* _ = Lexer.reduce_type t tdict tlist in
+            Ok (name, t, None);
 
-    let rec eval_program (filename: string) : int =
-        let (tokens, tdict, tlist) = Lexer.lex filename in
-        let fpool = Parser.gen_function_pool tokens in
+        (* checks if the obj really fits the type of t *)
+        let typecheck (t : ty) (o : obj) : bool =
+            match (Lexer.reduce_type t, o) with
+            | (Base "char", CharObj _) -> true
+            | (Base "int", IntObj _) -> true
+            | (Base "string", StrObj _) -> true
+            | (Base "bool", BoolObj _) -> true
+            | (Base "void", VoidObj) -> true
+            | (_, StructObj (t, 
 
+        (* returns the variable v, except bound to the new object, if typechecking permits *)
+        let assign ((name, t, old_obj) : var) (o : obj) : (obj * var) res = 
+            match (o, t) with
+            | (CharObj, Base "char") ->
+            
 
+        let rec eval_line (line : line) (funcmap : func StrMap.t)  
+                          ((prev, next, stack, heap) : state) : state res= 
+            match line with 
+            | (Type ty)::(Identifier name)::Semicolon::rest ->
+                let new_var = (name, ty, 
+                Ok ((line, [Change (None, Some  
+                
 
-  end*)
+        (*let rec eval_program (filename: string) : int =
+            let (tokens, tdict, tlist) = Lexer.lex filename in
+            let fpool = Parser.gen_function_pool tokens in
+
+        *)
+
+  end

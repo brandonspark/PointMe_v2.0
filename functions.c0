@@ -26,7 +26,7 @@ string test ( int x) {
         return "it's something else";
     }
 }
-int main(){
+int main(string y, char* z){
     int x = 2;
     int y = 3;
     for (int i = 0; i < 3; i++){

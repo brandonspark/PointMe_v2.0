@@ -103,51 +103,17 @@ let rec str_token (t : token) =
     | Comma -> "," | Semicolon -> ";" | Period -> "." | EqEq -> "=="
     | NotEq -> "!=" | Leq -> "<=" | Geq -> ">="
 
-(* countSymbol is a CPS function that counts the number of times that a
- * symbol appears in the prefix of a list, and calls sc on that number and
- * the remainder of the list. *)
-let rec count_symbol (ss : string list) (target : string) : (int * string list) res = 
-    match ss with
-    | [] -> Ok (0, [])
-    | x::xs -> if x = target then 
-                    let* (n, l) = (count_symbol xs target) in Ok (n + 1, l)
-                             else Ok (0, x::xs)
-
-(* find_symbol is a CPS function that finds the first occurrence of some
- * character in a list, then returns the list to the left of it, inclusive on
- * the symbol, as well as the list to the right of the symbol *)
-let rec find_symbol (l : 'a list) (target : 'a) : ('a list * 'a list) res =
-    let rec find_symbol' (l : 'a list) (target : 'a) (acc : 'a list) =
-        match l with
-        | [] -> Error "Could not find symbol."
-        | x::xs -> if x = target then Ok (List.rev (x::acc), xs)
-                                  else find_symbol' xs target (x::acc) in
-    find_symbol' l target []
-
-(* find_symbols is a CPS function that finds the first occurrence of some
- * sequnece of symbols in a list, then returns the list to the left of it,
- * inclusive on the sequence of symbols, as well as the list to the right of the
- * sequence. *)
-let rec find_symbols (l : 'a list) (targets : 'a list) : ('a list * 'a list) res = 
-    match (l, targets) with
-    | ([], []) -> Ok ([], [])
-    | (x::xs, []) -> Ok ([], x::xs)
-    | (_, y::ys) -> let* (pre, rest) = (find_symbol l y) in
-                    let* post = Utils.is_prefix ys rest in
-                    return (pre @ ys, post)
-
 module type LEXER =
   sig
     type typeDict
     val programToString : string -> string
     val split : string -> string list        
-    val typedict_init : string list -> typeDict -> typeDict res 
-    val gen_typelist : string list -> string list -> string list res
-    val lex : string -> (token list * typeDict * string list) res  
+    val lex : string -> (token list * typeDict * string list * (ty * string) list StrMap.t) res  
   end
 
-module Lexer : LEXER =
+module Lexer = (*: LEXER =*)
   struct
+    open ResultMonad;;
 
     type typeDict = ty StrMap.t
 
@@ -290,65 +256,89 @@ module Lexer : LEXER =
                 "" -> ss
               | _ -> s::ss
 
-    let rec get_type (ss : string list) (acc : ty) : (ty * string list) res = 
-        match ss with
-        "*"::xs -> get_type xs (Ptr acc)
-      | "["::"]"::xs -> get_type xs (Array acc)
-      | _ -> Ok (acc, ss)
-    
-    let rec get_type_t (ts : token list) (acc : ty) : (ty * token list) res = 
-      match ts with
-        Asterisk::xs -> get_type_t xs (Ptr acc) 
-      | LBracket::RBracket::xs -> get_type_t xs (Array acc)
-      | _ -> Ok (acc, ts)
+    module Local1 =
+      struct
+        open ListStateResMonad
 
-    (* typedict_init, given a string list of the separated tokens, adds all the
-     * relationships created by typedefs in the program. It maps the new names
-     * to the old names. Notably, if the old name was a struct, the canonical
-     * name of that type has a "s_" prepended to it. *)
-    let rec typedict_init (ss : string list) (d : typeDict) : typeDict res = 
-      match ss with
-      | [] -> Ok d
-      | "typedef"::"struct"::oldname::rest ->
-            let* (ty, rest1) = get_type rest (Base ("s_" ^ oldname)) in
-            (match rest1 with
-            | [] -> Error "Nothing after the type."
-            | newname::rest2 -> 
-                let* (_, rest3) = find_symbol rest2 ";" in
-                typedict_init rest3 (StrMap.add newname ty d))
-      | "typedef"::oldname::rest -> 
-            let* (ty, rest1) = get_type rest (Base oldname) in
-            (match rest1 with
-            | [] -> Error "No type to typedef to."
-            | newname::rest2 -> 
-                let* (_, rest3) = find_symbol rest2 ";" in
-                typedict_init rest3 (StrMap.add newname ty d))
-      | x::xs -> typedict_init xs d
+        let rec get_type (acc : ty) = fun ss ->
+            let rec get_type' (l : string list) (acc : ty) : (ty * string list) res = 
+                match l with 
+                | "*"::xs -> get_type' xs (Ptr acc)
+                | "["::"]"::xs -> get_type' xs (Array acc)
+                | _ -> Ok (acc, l) in
+            get_type' ss acc
+            
+        let rec get_type_t (acc : ty) = fun ts ->
+            let rec get_type_t' (l : token list) (acc : ty) = 
+                match l with
+                | Asterisk::xs -> get_type_t' xs (Ptr acc) 
+                | LBracket::RBracket::xs -> get_type_t' xs (Array acc)
+                | _ -> Ok (acc, l) in
+            get_type_t' ts acc
 
-    (* gen_typelist, give a string list of the separated tokens in the program,
-     * adds on all of the new types initialized by struct declarations in "s_"
-     * prepended form to an accumulator list. these effectively form the set of
-     * "canonical types" for the program, that are their own most simplified
-     * forms. *)
-    let rec gen_typelist (ss : string list) (acc : string list) : string list res = match ss with
-        [] -> Ok acc
-      | "struct"::sid::"{"::rest -> 
-            let* (_, rest') = find_symbol rest "}" in
-            (match rest' with
-            | ";"::rest'' -> gen_typelist rest'' (("s_" ^ sid)::acc)
-            | _ -> Error "Did not find semicolon after right curly.\n")
-      | "struct"::sid::";"::rest -> gen_typelist rest (("s_" ^ sid)::acc)
-      | x::xs -> gen_typelist xs acc
+        (* typedict_init, given a string list of the separated tokens, adds all the
+         * relationships created by typedefs in the program. It maps the new names
+         * to the old names. Notably, if the old name was a struct, the canonical
+         * name of that type has a "s_" prepended to it. *)
+        let rec typedict_init (d : typeDict) : (typeDict, 'a) m = fun l ->
+          match l with 
+          | [] -> Ok (d, [])
+          | "typedef"::"struct"::oldname::rest
+          | "typedef"::oldname::rest -> 
+                let prefix = (match l with "typedef"::"struct"::_::_ -> "s_" | _ -> "") in
+                runState rest @@
+                let+ ty      = get_type (Base (prefix ^ oldname)) in
+                let+ newname = pop in
+                let+ _       = find_symbol ";" in
+                let+ tdict = typedict_init (StrMap.add newname ty d) in
+                return_both tdict
+                (*eval return_both @@ typedict_init (StrMap.add newname ty d) *)
+          | x::xs -> 
+                runState xs @@
+                let+ res = typedict_init d in
+                return_both res 
+                (*runState xs @@ eval return_both @@ typedict_init d
+*)
+        (* gen_typelist, give a string list of the separated tokens in the program,
+         * adds on all of the new types initialized by struct declarations in "s_"
+         * prepended form to an accumulator list. these effectively form the set of
+         * "canonical types" for the program, that are their own most simplified
+         * forms. *)
+        let rec gen_typelist (acc : string list) : (string list, string) m =
+            function
+            | [] -> Ok (acc, [])
+            | "struct"::sid::"{"::rest ->
+                runState rest @@
+                let+ _     = find_symbol "}" in
+                let+ ()    = expect ";" in
+                let+ tlist = gen_typelist (("s_" ^ sid)::acc) in
+                return_both tlist
+            | "struct"::sid::";"::rest -> 
+                runState rest @@
+                let+ tlist = gen_typelist (("s_" ^ sid)::acc) in
+                return_both tlist
+            | x::xs -> 
+                runState xs @@
+                let+ tlist = gen_typelist acc in
+                return_both tlist
+    end 
+    include Local1 
 
     (* a function for navigating the type dict, to find the canonical type. *)
-    (*let rec findCanonicalType (s : string) (typeList : string list) (tdict : typeDict) = 
-        try (List.find (fun elem -> elem = s) typeList, 0) with Not_found -> 
-            match StrMap.find s tdict with
-                Ptr t ->
-              | Array t ->
-              | Base t -> 
-            let (ct, n') = findCanonicalType t typeList tdict in
-            (ct, n + n')*)
+    let rec reduce_type (t : ty) (typeList : string list) (tdict : typeDict) : ty res = 
+        let rec reduce_type' (t : ty) = 
+            match t with
+            | Base s -> 
+                if StrMap.mem s tdict then reduce_type' (StrMap.find s tdict)
+                                      else (if List.mem s typeList then Ok t
+                                                    else Error "Cannot resolve type")
+            | Ptr p -> 
+                let* new_ty = reduce_type' p in
+                Ok (Ptr new_ty)
+            | Array a ->
+                let* new_ty = reduce_type' a in
+                Ok (Array new_ty) in
+        reduce_type' t 
 
     (* hasLast checks if a char list has a last character of the provided
      * character *)
@@ -465,19 +455,60 @@ module Lexer : LEXER =
       | "#use" -> Use 
       | _ -> matchRest (Utils.explode s) tdict tlist
 
-    let rec consolidate_types (ts : token list) (acc : token list) = match ts with
-        (Type t)::rest -> 
-            let* (ty, rest') = get_type_t rest t in
-            consolidate_types rest' ((Type ty)::acc)
-      | [] -> Ok acc
-      | x::xs -> consolidate_types xs (x::acc)
-        
+    module Local2 =
+      struct
+        open ListStateResMonad
+
+        let rec consolidate_types (acc : token list) : ('a list, token) m =
+            function
+            | (Type t)::rest -> 
+                runState rest @@
+                let+ ty = get_type_t t in
+                let+ final = consolidate_types ((Type ty)::acc) in
+                return_both final
+            | [] -> Ok (acc, [])
+            | x::xs -> 
+                runState xs @@
+                let+ final = consolidate_types (x::acc) in
+                return_both final
+
+        let rec parse_fields (l : token list) (acc : (ty * string) list) : (ty * string) list = 
+            match l with
+            | Struct::(Type t)::(Identifier id)::Semicolon::rest
+            | (Type t)::(Identifier id)::Semicolon::rest -> 
+                parse_fields rest ((t, id)::acc)
+            | _ -> (List.rev acc)
+
+        let rec get_structinfo (acc : (ty * string) list StrMap.t) : ((ty * string) list StrMap.t, token) m = fun l ->
+            match l with 
+            | Struct::(Type (Base name))::LCurly::xs ->
+                runState xs @@
+                let+ arglist = find_end (LCurly, RCurly) in
+                let  fields  = parse_fields arglist [] in
+                eval return_both @@ get_structinfo (StrMap.add name fields acc)
+            | x::xs -> 
+                runState xs @@
+                eval return_both @@ get_structinfo acc
+            | [] -> Ok (acc, [])
+      end
+    include Local2
+
+    let rec remove_token (t : token) (ts : token list) (acc : token list) : token list =
+        match ts with
+        | [] -> List.rev acc
+        | x::xs -> if t = x then remove_token t xs acc
+                            else remove_token t xs (x::acc)
+
     (* lex finally lexes the entirety of the file. *)
-    let lex (fileName : string) : (token list * typeDict * string list) res =
+    let lex (fileName : string) : (token list * typeDict * string list * (ty * string) list StrMap.t) res =
         let slist = split fileName in
-        let* tdict = typedict_init slist (StrMap.empty) in
-        let* tlist = gen_typelist slist ["int"; "bool"; "void"; "string"; "char"] in
-        let tokens = List.map (fun s -> matcher s tdict tlist) slist in
-        let* types_parsed = consolidate_types tokens [] in
-        return @@ (List.rev types_parsed, tdict, tlist)
+        let* tdict = ListStateResMonad.runState slist @@ typedict_init (StrMap.empty) in
+        let* tlist = ListStateResMonad.runState slist @@ gen_typelist ["int"; "bool"; "void"; "string"; "char"] in
+        let tokens = List.map (fun s -> matcher s tdict tlist) slist in 
+        let* types_parsed = ListStateResMonad.runState tokens @@ consolidate_types [] in
+        let* sinfo = ListStateResMonad.runState (List.rev types_parsed) @@ get_structinfo (StrMap.empty) in
+        (*let new_tokens = remove_token Struct types_parsed [] in*)
+        return @@ (List.rev types_parsed, tdict, tlist, sinfo)
+
 end;;
+

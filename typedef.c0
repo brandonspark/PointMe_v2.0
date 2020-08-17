@@ -1,4 +1,8 @@
 
+struct thing {
+    bool excel;
+    string xd;
+};
 typedef string charstar;
 
 typedef int foo;
@@ -7,7 +11,9 @@ typedef foo bar;
 
 struct client {
     int x;
+    client_t *z;
     int y;
+    struct client z;
 };
 
 typedef struct client client_t;
