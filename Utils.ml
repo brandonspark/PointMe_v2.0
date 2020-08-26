@@ -1,4 +1,5 @@
 module StrMap = Map.Make(String);;
+module IntMap = Map.Make(Int);;
 
 type 'a res = ('a, string) result
 
@@ -21,6 +22,7 @@ module type UTILS =
     val dict_to_list : 'a StrMap.t -> (string * 'a) list
     val take_two : 'a list -> 'a * 'a
     val print_blue : string -> unit
+    val zip : 'a list -> 'b list -> ('a * 'b) list
   end
 
 module ResultMonad : sig
@@ -40,17 +42,17 @@ module ResultMonad : sig
 
 module ListStateResMonad =
   struct
-    type 'a state = 'a list
-    type ('v, 'a) m = 'a state -> ('v * 'a state) res
+    type 'a mstate = 'a list
+    type ('v, 'a) m = 'a mstate -> ('v * 'a mstate) res
 
     (* returns a monadic computation that will return the input *)
     let return (x : 'v) : ('v, 'a) m = fun s -> Ok (x, s)
     
     (* gets you the state *)
-    let get : ('a state, 'a) m = fun s -> Ok (s, s)
+    let get : ('a mstate, 'a) m = fun s -> Ok (s, s)
 
     (* replaces the state *)
-    let put (s : 'a state) : (unit, 'a) m = fun s' -> Ok ((), s)
+    let put (s : 'a mstate) : (unit, 'a) m = fun s' -> Ok ((), s)
 
     (* bind. *)
     let bind (x : ('v, 'a) m) (f : 'v -> ('b, 'a) m) : ('b, 'a) m =
@@ -65,7 +67,7 @@ module ListStateResMonad =
     let (let+) x f = bind x f
 
     (* return_both evals to a monadic computation whose value is both input and state *)
-    let return_both (x : 'v) : ('v * 'a state, 'a) m = fun s -> Ok ((x, s), s)
+    let return_both (x : 'v) : ('v * 'a mstate, 'a) m = fun s -> Ok ((x, s), s)
 
     (* return_opt unpacks a res and is a comp. whose value is that res' value *)
     let return_opt (x : 'v res) : ('v, 'a) m = 
@@ -88,12 +90,12 @@ module ListStateResMonad =
         x >>= (fun res -> mode res)
 
     (* runState takes in a state and monad and returns the monad's result *)
-    let runState (s : 'a state) (p : ('v, 'a) m) : 'v res = 
+    let runState (s : 'a mstate) (p : ('v, 'a) m) : 'v res = 
         ResultMonad.(>>=) (p s) (fun (v, s) -> Ok v)
 
     (* suspend ignores the current state and does a monad's computation with a
      * state given as parameter, then puts the current state back *)
-    let suspend (s : 'a state) (p : ('v, 'a) m) : ('v, 'a) m =
+    let suspend (s : 'a mstate) (p : ('v, 'a) m) : ('v, 'a) m =
         fun initState ->
             match p s with
             | Error e -> Error e
@@ -116,7 +118,7 @@ module ListStateResMonad =
         | [] -> Error "Canont peek from empty list"
         | x::xs -> Ok (x, x::xs)
 
-    let cons : ('a * 'a state, 'a) m =
+    let cons : ('a * 'a mstate, 'a) m =
         function
         | [] -> Error "Cannot cons from the empty list."
         | x::xs -> Ok ((x, xs), xs)
@@ -192,10 +194,31 @@ module ListStateResMonad =
                     | _ -> get_pair' xs n mark (x::acc))) in 
         fun l ->
         get_pair' l 0 false []
+
+
   end
 
+module StateMonad =
+  struct
+      type ('v, 'a) m = 'a -> ('v * 'a)
+      let return (x : 'v) : ('v, 'a) m = fun s -> (x, s)
+      let get : ('a, 'a) m = fun s -> (s, s)
+      let put (s : 'a) : (unit, 'a) m = fun s -> ((), s)
+      let bind (x : ('v, 'a) m) (f : 'v -> ('b, 'a) m) : ('b, 'a) m =
+          fun initState ->
+              let (res, newState) = x initState in
+              let newComputation = f res in
+              newComputation newState
+      let (>>=) = bind
+      let (let-) = bind
+
+      let return_both (x : 'v) : ('v * 'a, 'a) m = fun s -> ((x, s), s)
+      let runState (s : 'a) (p : ('v, 'a) m) : 'v = fst (p s)
+
+  end
 module Utils : UTILS =
   struct
+    
     let explode (s : string) : char list = List.init (String.length s) (String.get s)
     let implode (cs : char list) : string =
         let buf = Buffer.create(List.length cs) in
@@ -255,4 +278,9 @@ module Utils : UTILS =
         let () = print_string s in 
         print_string "\027[0m"
   
+    let rec zip (l : 'a list) (r : 'b list) : ('a * 'b) list =
+        match (l, r) with
+        | ([], _) -> []
+        | (_, []) -> []
+        | (x::xs, y::ys) -> (x, y) :: (zip xs ys)
   end

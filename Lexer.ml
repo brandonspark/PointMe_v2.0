@@ -17,7 +17,7 @@ type token =
    | StrLit of string
    | ChrLit of char
    | LibLit of string
-   | Const of int
+   | Const of Int32.t
    | Bool of bool
    | Type of ty
    | Struct
@@ -69,7 +69,7 @@ let rec str_token (t : token) =
     | StrLit s -> s
     | ChrLit c -> sp "'%c'" c
     | LibLit s -> sp "<%s>" s
-    | Const n -> sp "%d" n
+    | Const n -> sp "%d" (Int32.to_int n)
     | Bool b -> if b then "true" else "false"
     | Type ty -> str_ty ty
     | Struct -> "struct"
@@ -373,7 +373,7 @@ module Lexer = (*: LEXER =*)
                       else failwith "No ending apostrophe found.\n"
       | '<'::rest -> if hasLast rest '>' then LibLit (Utils.implode (Utils.dropR rest 1))
                                          else failwith "No ending chevron found"
-      | _ -> try Const (int_of_string (Utils.implode cs)) with int_of_string ->
+      | _ -> try Const (Int32.of_int @@ int_of_string (Utils.implode cs)) with int_of_string ->
                 let s = Utils.implode cs in
                 (match Utils.implode cs with
                     "int" ->  Type (Base "int")
