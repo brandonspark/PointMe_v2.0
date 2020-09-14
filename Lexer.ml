@@ -109,9 +109,10 @@ module type LEXER =
     val programToString : string -> string
     val split : string -> string list        
     val lex : string -> (token list * typeDict * string list * (ty * string) list StrMap.t) res  
+    val reduce_type : ty -> string list -> typeDict -> ty res
   end
 
-module Lexer = (*: LEXER =*)
+module Lexer : LEXER = (*: LEXER =*)
   struct
     open ResultMonad;;
 

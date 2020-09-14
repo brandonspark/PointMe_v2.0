@@ -24,27 +24,36 @@ type obj = CharObj of char
          | StrObj of string
          | BoolObj of bool
          | VoidObj
-         | StructObj of ty * obj option StrMap.t
-         | PtrObj of ty * (obj option ref)
-         | ArrObj of ty * (obj option Array.t)
+         | StructObj of ty * obj StrMap.t
+         | PtrObj of ty * ((int * obj ref) option)
+         | ArrObj of ty * ((int * obj Array.t) option)
 
-let str_obj (o : obj) =
+let rec str_obj (o : obj) =
     match o with
     | CharObj c -> Format.sprintf "%c" c
     | StrObj s -> s
     | IntObj n -> Format.sprintf "%d" (Int32.to_int n) 
     | BoolObj b -> if b then "true" else "false"
-    | _ -> "[NOT SUPPORTED]"
-
-
+    | VoidObj -> "<void>"
+    | ArrObj (_, None) -> "NULL_ARR"
+    | ArrObj (_, Some (i, arr)) ->
+        (Printf.sprintf "(%d)" i) ^ Array.fold_right (fun elem acc ->
+            ("[" ^ (str_obj elem) ^ "]") ^ acc) arr ""
+    | PtrObj (_, None) -> "NULL_PTR"
+    | PtrObj (_, Some (i, cell)) -> Printf.sprintf "ptr(%s)" @@ str_obj (!cell)
+    | StructObj (_, map) ->
+        let init_s = StrMap.fold (fun key obj acc ->
+            acc ^ ((Printf.sprintf ", %s: %s") key (str_obj obj)))
+            map "{" in
+        init_s ^ "}"
 
 module type PARSER =
   sig
-    val split_lines : token list -> func StrMap.t
-    val gen_function_pool : token list -> func StrMap.t
+    val get_functions : string -> (string * func) list res
+    val gen_function_pool : token list -> func StrMap.t res
   end
 
-module Parser =
+module Parser : PARSER =
   struct
 
     open ResultMonad
@@ -79,6 +88,13 @@ module Parser =
             return_both ((pre @ (LCurly::pre'))::res)
         | x::xs -> Error "Not a valid start to the function."
 
+    let wrapper (t : token) (line : line) =
+        match t with
+        | Return -> ReturnStmt line
+        | Assert -> AssertStmt line
+        | Error_t -> ErrorStmt line
+        | _ -> failwith "Impossible."
+
     (* from a list of tokens, find the first stmt and construct it *)
     let rec stmt_construct : (statement, token) m = fun ts ->
         match ts with
@@ -101,18 +117,10 @@ module Parser =
             let+ stmt = stmt_construct in
             return_both (if first = For then ForStmt (cond, stmt)
                                         else WhileStmt (cond, stmt))
-        | Return::xs ->
+        | ((Return | Assert | Error_t) as t)::xs ->
             runState xs @@
             let+ line = find_symbol Semicolon in
-            return_both @@ ReturnStmt line
-        | Assert::xs ->
-            runState xs @@
-            let+ line = find_symbol Semicolon in
-            return_both @@ AssertStmt line
-        | Error_t::xs ->
-            runState xs @@
-            let+ line = find_symbol Semicolon in
-            return_both @@ ErrorStmt line
+            return_both @@ wrapper t line
         | LCurly::xs -> 
             runState xs @@
             let+ block = find_end (LCurly, RCurly) in
@@ -185,10 +193,18 @@ module Parser =
             | _ -> Error "Error in folding.") (Ok StrMap.empty) recordMappedRes in
             foldedRecords
             
-    let split_lines (filename : string) : func StrMap.t res = 
+    let get_functions (filename : string) = 
         let* (lexed, tdict, tlist, sinfo) = Lexer.lex filename in 
         let* fpool = gen_function_pool lexed in
-        Ok fpool
+        Ok (Utils.dict_to_list fpool)
+  end
+
+module type PRATT =
+  sig
+    type ast
+    val expr_bp : int -> (ast, token) ListStateResMonad.m
+    val str_pratt : ast -> string
+    val test : string -> ast res
   end
 
 module Pratt =
@@ -204,6 +220,26 @@ module Pratt =
              | ArrowAccess of ast * string
              | ArrayAccess of ast * ast
              | Cond of ast * ast * ast
+             | AllocNode of ty
+             | AllocArrNode of ty * ast
+
+    let rec str_ast (a : ast) =
+        match a with
+        | BinOp (t, l, r) -> Printf.sprintf "BinOp (%s, %s, %s)" (str_token t)
+                             (str_ast l) (str_ast r)
+        | UnOp (t, x) -> Printf.sprintf "UnOp (%s, %s)" (str_token t) (str_ast x)
+        | Call (name, l) ->
+            "(" ^ (List.fold_right (fun elem acc ->
+                (str_ast elem) ^ acc) l ")")
+        | Name n -> n
+        | Lit o -> str_obj o
+        | DotAccess (x, f) -> Printf.sprintf "%s.%s" (str_ast x) f
+        | ArrowAccess (x, f) -> Printf.sprintf "%s->%s" (str_ast x) f
+        | ArrayAccess (x, y) -> Printf.sprintf "%s[%s]" (str_ast x) (str_ast y)
+        | Cond (i, t, e) -> Printf.sprintf "%s ? %s : %s" (str_ast i) (str_ast
+        t) (str_ast e)
+        | AllocNode t -> Printf.sprintf "alloc(%s)" (str_ty t)
+        | AllocArrNode (t, x) -> Printf.sprintf "alloc_array(%s, %s)" (str_ty t) (str_ast x)
 
     let prefix_bp (t : token) =
         match t with
@@ -230,11 +266,9 @@ module Pratt =
     let postfix_bp (t : token) =
         match t with
         | LParen | LBracket -> Some 27
-        | Increment | Decrement -> Some 23
         | _ -> None
 
-    exception Break of ast 
-    exception Continue of ast * int
+    exception InvalidToken of token list 
 
     let expectID : (string, token) m =
         fun ts ->
@@ -244,14 +278,21 @@ module Pratt =
         | (Identifier name)::rest -> return (name, rest)
         | _ -> return_err "Did not get an identifier next."
 
+    exception InvalidAST of ast
+
     let rec get_args_list (acc : ast list) : (ast list, token) m =
         fun ts ->
         match ts with
         | [RParen] -> Ok (List.rev acc, [])
+        | [Comma] -> Error "Function args ends in semicolon."
+        | Comma::xs ->
+            runState xs @@
+            eval return_both @@ get_args_list acc
         | x::xs ->
             runState (x::xs) @@
             let+ ast = expr_bp 0 in
             eval return_both @@ get_args_list (ast::acc)
+            (*eval return_both @@ get_args_list (ast::acc)*)
         | _ -> Error "Did not find an RParen at the end of function call."   
 
     (* nud, given a token list, returns Ok (lhs, rest), where
@@ -275,6 +316,22 @@ module Pratt =
             let+ lhs = expr_bp 0 in 
             let+ _   = expect RParen in
             return_both lhs (* recurse for one expression *)
+        | Alloc ->
+            let+ _     = expect LParen in
+            let+ next  = pop in
+            let+ _     = expect RParen in
+            (match next with
+            | Type t -> return_both @@ AllocNode t
+            | _ -> return_err "Alloc was not passed a type.")
+        | Alloc_array ->
+            let+ _   = expect LParen in
+            let+ t   = pop in
+            let+ _   = expect Comma in
+            let+ num = expr_bp 0 in
+            let+ _   = expect RParen in
+            (match t with
+            | Type t -> return_both @@ AllocArrNode (t, num)
+            | _ -> return_err "Alloc_array was not passed a type.")
         | _ -> return_err "No tokens left"
 
     (* led, given an AST, binding power, and token list, searches the token
@@ -308,12 +365,15 @@ module Pratt =
                         (match lhs with
                         | Name name ->
                             let+ arglist = find_end (LParen, RParen) in
+                            let _ = Utils.print_blue "before args\n" in
                             let+ args    = suspend arglist @@ get_args_list [] in
+                            let _ = Utils.print_blue "done with args\n" in
                             let+ new_lhs = led (Call (name, args)) bp in 
                             eval return_both @@ led new_lhs bp
                         | _ -> return_err "LParen found after non-name")
                     (* Every other postfix - shouldn't exist. *)
-                    | _ -> return_err "shouldn't error here, only two postfix")
+                    | _ -> return_both lhs (* "shouldn't error here, only two
+                    postfix" *))
             (**********************
              * INFIX OPERATORS    *
              **********************)
@@ -366,19 +426,15 @@ module Pratt =
         | ArrayAccess (a1, a2) -> Format.sprintf "%s[%s]" (str_pratt a1) (str_pratt a2)
         | Cond (c, a1, a2) -> Format.sprintf "(%s ? %s : %s)" (str_pratt c)
                                              (str_pratt a1) (str_pratt a2) 
-    
+        | AllocNode t -> Format.sprintf "alloc(%s)" (str_ty t)
+        | AllocArrNode (t, ast) -> Format.sprintf "alloc_array(%s, %s)"
+                                   (str_ty t) (str_pratt ast)
     open ResultMonad
 
     let test (filename : string) = 
         let* (tokens, typedict, typelist, sinfo) = Lexer.lex filename in
-        let (prev, next, stack, heap) = ([], [], StrMap.empty, StrMap.empty) in
         let* ast = runState tokens @@ expr_bp 0 in
         let () = Utils.print_blue (str_pratt ast) in 
         let () = print_string "\n" in
         Ok ast
-
-    (*let test2 (thing : string) =
-        let* (tokens, _, _) = Lexer.lex thing in
-        let* (a, rest) = expr_bp 0 tokens in
-        Ok (a, rest)*)
   end

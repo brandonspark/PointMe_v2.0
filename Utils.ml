@@ -20,9 +20,16 @@ module type UTILS =
     val is_prefix : 'a list -> 'a list -> 'a list res
     val take : 'a list -> int -> 'a list
     val dict_to_list : 'a StrMap.t -> (string * 'a) list
+    val str_dict : ('a -> string) -> 'a StrMap.t -> string 
     val take_two : 'a list -> 'a * 'a
     val print_blue : string -> unit
+    val print_red : string -> unit
+    val print_purple : string -> unit
+    val print_yellow : string -> unit
     val zip : 'a list -> 'b list -> ('a * 'b) list
+    val print_list : ('a -> string) -> 'a list -> unit
+    val list_to_str : ('a -> string) -> 'a list -> string
+    val print_opt :  ('a -> string) -> 'a option -> string
   end
 
 module ResultMonad : sig
@@ -269,18 +276,57 @@ module Utils : UTILS =
         let seq = StrMap.to_seq d in
         Seq.fold_left (fun a b -> b::a) [] seq
 
+    let str_dict (f : 'a -> string) (d : 'a StrMap.t) =
+        let d = dict_to_list d in
+        let post = List.fold_right (fun (k, v) acc ->
+            (Printf.sprintf "%s: %s, " k (f v)) ^ acc)
+            d "}" in 
+        "{" ^ post
+
     let take_two (l : 'a list) = match l with
         x::y::xs -> (x, y)
       | _ -> failwith "Unable to take two from this list."
+
+    let reset_color () = print_string "\027[0m"
+
+    let print_purple (s : string) = 
+        let () = print_string "\027[95m" in
+        let () = print_string s in
+        reset_color ()
 
     let print_blue (s : string) = 
         let () = print_string "\027[94m" in 
         let () = print_string s in 
         print_string "\027[0m"
   
+    let print_red (s : string) =
+        let () = print_string "\027[91m" in
+        let () = print_string s in
+        reset_color ()
+
+    let print_yellow (s : string) =
+        let () = print_string "\027[93m" in
+        let () = print_string s in
+        reset_color ()
+
     let rec zip (l : 'a list) (r : 'b list) : ('a * 'b) list =
         match (l, r) with
         | ([], _) -> []
         | (_, []) -> []
         | (x::xs, y::ys) -> (x, y) :: (zip xs ys)
+
+    let list_to_str (f : 'a -> string) (l : 'a list) =
+        let mapped = List.map f l in
+        List.fold_left (fun elem acc -> elem ^ " " ^ acc) "" mapped
+    
+    let print_list (f : 'a -> string) (l : 'a list) =
+        let s = list_to_str f l in
+        let _ = print_string s in
+        let _ = print_string "\n" in
+        ()
+
+    let print_opt (f : 'a -> string) (o : 'a option) =
+        match o with
+        | None -> "NONE"
+        | Some v -> f v 
   end
